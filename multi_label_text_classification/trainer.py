@@ -1,14 +1,13 @@
-import os
-
-import torch
-from sklearn import metrics
-from torch import nn
-from torch.cuda.amp import autocast
+from pickletools import optimize
 from torch.utils.data import DataLoader
-from tqdm import tqdm
-from transformers import AdamW, get_scheduler
-
 from model import Classifier
+from torch import nn
+from transformers import AdamW, get_scheduler
+import torch
+from torch.cuda.amp import autocast
+from sklearn import metrics
+import os
+from tqdm import tqdm
 
 
 class Trainer(object):
@@ -31,16 +30,16 @@ class Trainer(object):
         no_decay = ['bias,', 'LayerNorm']
         other = ['dense', 'fc']
         no_main = no_decay + other
-        param_group = [
+        return [
             {
-                'params': [p for n, p in params if not any(nd in n for nd in no_main)],
+                'params': [p for n, p in params if all(nd not in n for nd in no_main)],
                 'weight_decay': 1e-2,
             },
             {
                 'params': [
                     p
                     for n, p in params
-                    if not any(nd in n for nd in other)
+                    if all(nd not in n for nd in other)
                     and any(nd in n for nd in no_decay)
                 ],
                 'weight_decay': 0,
@@ -58,12 +57,11 @@ class Trainer(object):
                     p
                     for n, p in params
                     if any(nd in n for nd in other)
-                    and not any(nd in n for nd in no_decay)
+                    and all(nd not in n for nd in no_decay)
                 ],
                 'weight_decay': 1e-2,
             },
         ]
-        return param_group
 
     def train(self) -> None:
         ## 总的训练次数
@@ -78,7 +76,7 @@ class Trainer(object):
             self.config.model_url, len(self.labels), self.config.max_len
         )
         self.model.to(self.config.device)
-        self.loss_fn = torch.nn.CrossEntropyLoss()
+        self.loss_fn = torch.nn.BCEWithLogitsLoss()
 
         ## 定义优化器和学习了变化曲线，能够随着训练变化学习率大小
         optimizer = AdamW(self.get_group_parameters(self.model), lr=self.config.lr)
@@ -158,7 +156,7 @@ class Trainer(object):
                     f1_best = 0
                     if f1 > f1_best:
                         print(
-                            ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> 保存模型 >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n"
+                            ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> 保存模型 >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"
                         )
                         print(f"Save Path = {self.config.save_dir}")
                         print(f"Best F1 = {f1_best:.4f}")
@@ -196,10 +194,12 @@ class Trainer(object):
                 output = self.model(input_ids, attention_mask)
                 loss = self.loss_fn(output, target)
                 total_loss += loss.item()
+
                 labels = target.cpu().tolist()
-                predic = torch.max(output, -1)[1].cpu().tolist()
-                all_pre.extend(predic)
+                predict = torch.where(torch.sigmoid(output) > 0.5, 1, 0).cpu().tolist()
+                all_pre.extend(predict)
                 all_true.extend(labels)
+
                 loop.set_description('Evaling')
                 loop.set_postfix(loss=loss.item())
 
@@ -241,9 +241,9 @@ class Trainer(object):
                 total_loss += loss.item()
 
                 labels = target.cpu().tolist()
-                predic = torch.max(output, -1)[1].cpu().tolist()
+                predict = torch.where(torch.sigmoid(output) > 0.5, 1, 0).cpu().tolist()
 
-                all_pre.extend(predic)
+                all_pre.extend(predict)
                 all_text.extend(batch['text'])
                 all_true.extend(labels)
 
@@ -256,10 +256,15 @@ class Trainer(object):
         print(
             f'>> 预测结果 >>:  Loss:{total_loss:.4f}  Acc:{acc:.4f}  MicroF1:{f1_mi:.4f}  MacroF1:{f1_ma:.4f}'
         )
-        predict_labels = [self.labels[i] for i in all_pre]
+
+        predict_labels = [
+            [self.labels[j] for j in range(len(all_pre[i])) if all_pre[i][j] == 1]
+            for i in range(len(all_pre))
+        ]
+
         with open('predict_result.txt', 'a', encoding='utf8') as f:
             for i in range(len(predict_labels)):
-                f.write(predict_labels[i] + '\t' + all_text[i] + '\n')
+                f.write('|'.join(predict_labels[i]) + '\t' + all_text[i] + '\n')
         print(
             ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> 预测结束 >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n"
         )
