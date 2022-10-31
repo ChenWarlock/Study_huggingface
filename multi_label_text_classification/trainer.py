@@ -110,6 +110,7 @@ class Trainer(object):
         )
 
         print(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> 开始训练 >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
+        f1_best = 0
         for epoch in range(self.config.epochs):
 
             ## 定义循环进度条,长度ncols可以自行修改
@@ -148,13 +149,13 @@ class Trainer(object):
             ## 是否验证模型效果
             if self.config.is_eval and (epoch + 1) % self.config.eval_epoch == 0:
                 f1 = self.eval()
-
                 ## 是否保存最好模型
                 if self.config.save_best:
                     if not os.path.exists(self.config.save_dir):
                         os.makedirs(self.config.save_dir)
-                    f1_best = 0
+
                     if f1 > f1_best:
+                        f1_best = f1
                         print(
                             ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> 保存模型 >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"
                         )
