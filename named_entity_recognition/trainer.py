@@ -1,5 +1,6 @@
 import os
 
+import numpy as np
 import torch
 from sklearn import metrics
 from torch import nn
@@ -8,7 +9,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AdamW, get_scheduler
 
-from model import Classifier
+from model import BERT_BiLSTM_CRF
 
 
 class Trainer(object):
@@ -74,11 +75,10 @@ class Trainer(object):
         warmup_steps = int(step_total * self.config.num_warmup_rate)
 
         ## 定义模型与损失函数，这样定义是为了再验证时方便调用
-        self.model = Classifier(
-            self.config.model_url, len(self.labels), self.config.max_len
+        self.model = BERT_BiLSTM_CRF(
+            self.config.model_url, len(self.labels), self.config.rnn_dim
         )
         self.model.to(self.config.device)
-        self.loss_fn = torch.nn.CrossEntropyLoss()
 
         ## 定义优化器和学习了变化曲线，能够随着训练变化学习率大小
         optimizer = AdamW(self.get_group_parameters(self.model), lr=self.config.lr)
@@ -114,7 +114,6 @@ class Trainer(object):
         print(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> 开始训练 >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
         f1_best = 0
         for epoch in range(self.config.epochs):
-
             ## 定义循环进度条,长度ncols可以自行修改
             loop = tqdm(
                 enumerate(self.train_dataloader),
@@ -131,11 +130,9 @@ class Trainer(object):
                 ## 是否启用混合精度训练
                 if self.config.is_autocast:
                     with autocast():
-                        output = self.model(input_ids, attention_mask)
-                        loss = self.loss_fn(output, target)
+                        loss = self.model(input_ids, attention_mask, target)
                 else:
-                    output = self.model(input_ids, attention_mask)
-                    loss = self.loss_fn(output, target)
+                    loss = self.model(input_ids, attention_mask, target)
                 loss.backward()
 
                 ## 梯度累加步数
@@ -151,7 +148,6 @@ class Trainer(object):
             ## 是否验证模型效果
             if self.config.is_eval and (epoch + 1) % self.config.eval_epoch == 0:
                 f1 = self.eval()
-
                 ## 是否保存最好模型
                 if self.config.save_best:
                     if not os.path.exists(self.config.save_dir):
@@ -194,16 +190,24 @@ class Trainer(object):
                 input_ids = batch['input_ids'].to(self.config.device)
                 attention_mask = batch['attention_mask'].to(self.config.device)
                 target = batch['labels'].to(self.config.device)
-                output = self.model(input_ids, attention_mask)
-                loss = self.loss_fn(output, target)
+                loss = self.model(input_ids, attention_mask, target)
                 total_loss += loss.item()
-                labels = target.cpu().tolist()
-                predic = torch.max(output, -1)[1].cpu().tolist()
-                all_pre.extend(predic)
+
+                predict = self.model.predict(input_ids, attention_mask)
+                masks = torch.sum(batch['attention_mask'], dim=1)
+                labels = [
+                    label[1 : mask - 1].tolist()
+                    for mask, label in zip(masks, target.cpu())
+                ]
+                predict = [i[1:-1] for i in predict]
+                all_pre.extend(predict)
                 all_true.extend(labels)
                 loop.set_description('Evaling')
                 loop.set_postfix(loss=loss.item())
 
+        func = lambda x: [y for l in x for y in func(l)] if type(x) is list else [x]
+        all_true = func(all_true)
+        all_pre = func(all_pre)
         acc = metrics.accuracy_score(all_true, all_pre)
         f1_mi = metrics.f1_score(all_true, all_pre, average='micro')
         f1_ma = metrics.f1_score(all_true, all_pre, average='macro')
@@ -222,7 +226,6 @@ class Trainer(object):
         )
         self.model.eval()
         all_pre = []
-        all_text = []
         all_true = []
         total_loss = 0
         loop = tqdm(
@@ -236,31 +239,37 @@ class Trainer(object):
                 input_ids = batch['input_ids'].to(self.config.device)
                 attention_mask = batch['attention_mask'].to(self.config.device)
                 target = batch['labels'].to(self.config.device)
-
-                output = self.model(input_ids, attention_mask)
-                loss = self.loss_fn(output, target)
+                loss = self.model(input_ids, attention_mask, target)
                 total_loss += loss.item()
 
-                labels = target.cpu().tolist()
-                predic = torch.max(output, -1)[1].cpu().tolist()
-
-                all_pre.extend(predic)
-                all_text.extend(batch['text'])
+                predict = self.model.predict(input_ids, attention_mask)
+                masks = torch.sum(batch['attention_mask'], dim=1)
+                labels = [
+                    label[1 : mask - 1].tolist()
+                    for mask, label in zip(masks, target.cpu())
+                ]
+                predict = [i[1:-1] for i in predict]
+                all_pre.extend(predict)
                 all_true.extend(labels)
-
                 loop.set_description('Predicting')
                 loop.set_postfix(loss=loss.item())
 
-        acc = metrics.accuracy_score(all_true, all_pre)
-        f1_mi = metrics.f1_score(all_true, all_pre, average='micro')
-        f1_ma = metrics.f1_score(all_true, all_pre, average='macro')
+        func = lambda x: [y for l in x for y in func(l)] if type(x) is list else [x]
+        true = func(all_true)
+        pre = func(all_pre)
+        acc = metrics.accuracy_score(true, pre)
+        f1_mi = metrics.f1_score(true, pre, average='micro')
+        f1_ma = metrics.f1_score(true, pre, average='macro')
         print(
             f'>> 预测结果 >>:  Loss:{total_loss:.4f}  Acc:{acc:.4f}  MicroF1:{f1_mi:.4f}  MacroF1:{f1_ma:.4f}'
         )
-        predict_labels = [self.labels[i] for i in all_pre]
+        for i in range(len(all_pre)):
+            for j in range(len(all_pre[i])):
+                all_pre[i][j] = self.labels[all_pre[i][j]]
+
         with open('predict_result.txt', 'a', encoding='utf8') as f:
-            for i in range(len(predict_labels)):
-                f.write(predict_labels[i] + '\t' + all_text[i] + '\n')
+            for item in all_pre:
+                f.write('\t'.join(item) + '\n')
         print(
             ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> 预测结束 >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n"
         )
